@@ -7,31 +7,39 @@ from thefuzz import process
 
 app = FastAPI(title="Jordan Transport Smart API")
 
-# إعداد الاتصال
+# --- الإعدادات والاتصال ---
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 client = MongoClient(MONGO_URI)
 db = client["JordanTransport"]
 collection = db["FullNetwork"]
 
-# --- 1. وظائف المعالجة ---
+# --- 1. وظائف المساعدة (Helpers) ---
 
 def normalize_arabic(text):
     if not text: return ""
-    text = str(text).strip() # حذف المسافات فوراً
+    text = str(text).strip()
     text = re.sub("[إأآ]", "ا", text)
     text = re.sub("ة", "ه", text)
     arabic_diacritics = re.compile(""" ّ | َ | ً | ُ | ٌ | ِ | ٍ | ْ | ـ """, re.VERBOSE)
     return re.sub(arabic_diacritics, '', text)
 
+def get_all_places_list():
+    """وظيفة موحدة لجلب قائمة بكل المناطق من الداتابيز"""
+    sources = collection.distinct("source")
+    all_docs = collection.find({}, {"destinations": 1})
+    dest_keys = []
+    for d in all_docs:
+        if "destinations" in d:
+            dest_keys.extend(d["destinations"].keys())
+    # تنظيف، حذف الفراغات، حذف التكرار، والترتيب
+    return sorted(list(set([p.strip() for p in (sources + dest_keys) if p])))
+
 def get_suggestions(user_input, all_places, limit=3):
-    """إعادة أفضل المقترحات للمستخدم"""
     normalized_input = normalize_arabic(user_input)
-    # نستخدم extract وليس extractOne لجلب أكثر من خيار
     matches = process.extract(normalized_input, all_places, limit=limit)
-    # نعيد فقط الأسماء التي تشبه المدخل بنسبة معقولة (مثلاً فوق 50%)
     return [m[0] for m in matches if m[1] >= 50]
 
-# --- 2. خوارزمية دايكسترا (نفس نسختك مع إضافة .strip() للجيران) ---
+# --- 2. خوارزمية دايكسترا ---
 
 def get_neighbors_from_db(node_name):
     neighbors = {}
@@ -91,22 +99,27 @@ def dijkstra_mongodb(start_node, end_node):
 
 # --- 3. المسارات (Endpoints) ---
 
+@app.get("/all-places")
+async def all_places_endpoint():
+    """يعيد قائمة بكل المناطق المتاحة لزميلك في الـ UI"""
+    places = get_all_places_list()
+    return {"status": "success", "count": len(places), "places": places}
+
+@app.get("/suggest")
+async def suggest_endpoint(q: str):
+    """يعيد مقترحات أثناء الكتابة"""
+    places = get_all_places_list()
+    suggestions = get_suggestions(q, places, limit=5)
+    return {"status": "success", "suggestions": suggestions}
+
 @app.get("/get-route")
 async def get_route(start: str, end: str):
-    # جلب وتنظيف كل الأسماء من الداتابيز
-    sources = collection.distinct("source")
-    all_docs = collection.find({}, {"destinations": 1})
-    dest_keys = []
-    for d in all_docs:
-        if "destinations" in d: dest_keys.extend(d["destinations"].keys())
-    
-    all_places = list(set([p.strip() for p in (sources + dest_keys) if p]))
+    all_places = get_all_places_list()
 
-    # البحث عن تطابق عالي الدقة (90%)
+    # محاولة التطابق بدقة عالية (90%)
     match_start = process.extractOne(normalize_arabic(start), all_places, score_cutoff=90)
     match_end = process.extractOne(normalize_arabic(end), all_places, score_cutoff=90)
 
-    # إذا لم يجد تطابقاً دقيقاً، نرسل مقترحات للـ UI
     if not match_start or not match_end:
         return {
             "status": "ambiguous",
