@@ -7,51 +7,49 @@ from thefuzz import process
 
 app = FastAPI(title="Jordan Transport Smart API")
 
-# إعداد الاتصال باستخدام متغير البيئة (للرفع) أو المحلي (للتجربة)
+# إعداد الاتصال
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 client = MongoClient(MONGO_URI)
 db = client["JordanTransport"]
 collection = db["FullNetwork"]
 
-# --- 1. وظائف المعالجة والبحث الذكي (Fuzzy Matching) ---
+# --- 1. وظائف المعالجة ---
 
 def normalize_arabic(text):
     if not text: return ""
+    text = str(text).strip() # حذف المسافات فوراً
     text = re.sub("[إأآ]", "ا", text)
     text = re.sub("ة", "ه", text)
     arabic_diacritics = re.compile(""" ّ | َ | ً | ُ | ٌ | ِ | ٍ | ْ | ـ """, re.VERBOSE)
-    return re.sub(arabic_diacritics, '', text).strip()
+    return re.sub(arabic_diacritics, '', text)
 
-def get_best_match(user_input, all_places):
+def get_suggestions(user_input, all_places, limit=3):
+    """إعادة أفضل المقترحات للمستخدم"""
     normalized_input = normalize_arabic(user_input)
-    # تطابق تام
-    for place in all_places:
-        if normalize_arabic(place) == normalized_input:
-            return place
-    
-    # تطابق مرن
-    matches = process.extractOne(normalized_input, all_places, score_cutoff=60)
-    return matches[0] if matches else None
+    # نستخدم extract وليس extractOne لجلب أكثر من خيار
+    matches = process.extract(normalized_input, all_places, limit=limit)
+    # نعيد فقط الأسماء التي تشبه المدخل بنسبة معقولة (مثلاً فوق 50%)
+    return [m[0] for m in matches if m[1] >= 50]
 
-# --- 2. خوارزمية دايكسترا (النسخة المعتمدة لديكِ) ---
+# --- 2. خوارزمية دايكسترا (نفس نسختك مع إضافة .strip() للجيران) ---
 
 def get_neighbors_from_db(node_name):
     neighbors = {}
-    # 1- المسارات من هذا المصدر
+    node_name = node_name.strip()
+    
     doc_src = collection.find_one({"source": node_name})
     if doc_src and "destinations" in doc_src:
         for neighbor, edges in doc_src["destinations"].items():
-            neighbors.setdefault(neighbor, []).extend(edges)
+            neighbors.setdefault(neighbor.strip(), []).extend(edges)
 
-    # 2- المسارات حيث node_name موجود كوجهة (دعم الاتجاهين)
     docs_dest = collection.find({"destinations." + node_name: {"$exists": True}})
     for doc in docs_dest:
+        source_name = doc["source"].strip()
         for neighbor, edges in doc["destinations"].items():
             for edge in edges:
                 if edge.get("destination") == node_name or neighbor == node_name:
-                    neighbors.setdefault(doc["source"], []).append({
-                        "cost": edge["cost"],
-                        "line": edge["line"]
+                    neighbors.setdefault(source_name, []).append({
+                        "cost": edge["cost"], "line": edge["line"]
                     })
     return neighbors
 
@@ -74,27 +72,20 @@ def dijkstra_mongodb(start_node, end_node):
                     visited_info[neighbor] = (current_node, edge["line"])
                     heapq.heappush(priority_queue, (new_distance, neighbor))
 
-    if end_node not in distances:
-        return None, float('inf'), []
+    if end_node not in distances: return None, float('inf'), []
 
     path, lines, current = [], [], end_node
     while current != start_node:
         prev_node, line_used = visited_info[current]
-        path.append(current)
-        lines.append(line_used)
+        path.append(current); lines.append(line_used)
         current = prev_node
         
     path.append(start_node)
-    path.reverse()
-    lines.reverse()
+    path.reverse(); lines.reverse()
 
-    # تنظيف الخطوط (Clean Lines)
-    clean_lines = []
-    if lines:
-        clean_lines.append(lines[0]) 
-        for i in range(1, len(lines)):
-            if lines[i] != lines[i-1]:
-                clean_lines.append(lines[i])
+    clean_lines = [lines[0]] if lines else []
+    for i in range(1, len(lines)):
+        if lines[i] != lines[i-1]: clean_lines.append(lines[i])
 
     return path, distances[end_node], clean_lines
 
@@ -102,38 +93,38 @@ def dijkstra_mongodb(start_node, end_node):
 
 @app.get("/get-route")
 async def get_route(start: str, end: str):
-    # جلب قائمة بكل المناطق للبحث الذكي
-# جلب أسماء المناطق من الـ source ومن مفاتيح الـ destinations بشكل صحيح
+    # جلب وتنظيف كل الأسماء من الداتابيز
     sources = collection.distinct("source")
-    
-    # جلب كل المفاتيح الموجودة داخل حقول destinations
     all_docs = collection.find({}, {"destinations": 1})
     dest_keys = []
-    for doc in all_docs:
-        if "destinations" in doc:
-            dest_keys.extend(doc["destinations"].keys())
+    for d in all_docs:
+        if "destinations" in d: dest_keys.extend(d["destinations"].keys())
     
-    # دمج القائمتين وحذف التكرار
-    all_places = list(set(sources + dest_keys))    
-    corrected_start = get_best_match(start, all_places)
-    corrected_end = get_best_match(end, all_places)
+    all_places = list(set([p.strip() for p in (sources + dest_keys) if p]))
 
-    if not corrected_start or not corrected_end:
-        raise HTTPException(status_code=404, detail="اسم المنطقة غير واضح، حاول كتابة الاسم بشكل أدق")
+    # البحث عن تطابق عالي الدقة (90%)
+    match_start = process.extractOne(normalize_arabic(start), all_places, score_cutoff=90)
+    match_end = process.extractOne(normalize_arabic(end), all_places, score_cutoff=90)
 
+    # إذا لم يجد تطابقاً دقيقاً، نرسل مقترحات للـ UI
+    if not match_start or not match_end:
+        return {
+            "status": "ambiguous",
+            "message": "الرجاء اختيار المنطقة الصحيحة من المقترحات",
+            "suggestions": {
+                "start": get_suggestions(start, all_places) if not match_start else [match_start[0]],
+                "end": get_suggestions(end, all_places) if not match_end else [match_end[0]]
+            }
+        }
+
+    corrected_start, corrected_end = match_start[0], match_end[0]
     path, cost, lines = dijkstra_mongodb(corrected_start, corrected_end)
 
     if not path:
-        return {
-            "status": "no_path", 
-            "corrected_names": {"from": corrected_start, "to": corrected_end},
-            "message": "لا يوجد مسار مسجل بين هذه المناطق"
-        }
+        return {"status": "no_path", "corrected_names": {"from": corrected_start, "to": corrected_end}}
 
     return {
         "status": "success",
         "corrected_names": {"from": corrected_start, "to": corrected_end},
-        "path": path,
-        "total_cost": round(cost, 3),
-        "lines": lines
+        "path": path, "total_cost": round(cost, 3), "lines": lines
     }
