@@ -103,8 +103,18 @@ def dijkstra_mongodb(start_node, end_node):
 @app.get("/get-route")
 async def get_route(start: str, end: str):
     # جلب قائمة بكل المناطق للبحث الذكي
-    all_places = list(set(collection.distinct("source") + list(collection.distinct("destinations"))))
+# جلب أسماء المناطق من الـ source ومن مفاتيح الـ destinations بشكل صحيح
+    sources = collection.distinct("source")
     
+    # جلب كل المفاتيح الموجودة داخل حقول destinations
+    all_docs = collection.find({}, {"destinations": 1})
+    dest_keys = []
+    for doc in all_docs:
+        if "destinations" in doc:
+            dest_keys.extend(doc["destinations"].keys())
+    
+    # دمج القائمتين وحذف التكرار
+    all_places = list(set(sources + dest_keys))    
     corrected_start = get_best_match(start, all_places)
     corrected_end = get_best_match(end, all_places)
 
