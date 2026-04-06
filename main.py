@@ -150,6 +150,22 @@ async def get_route(start: str, end: str):
             }
         }
 
-    # الآن ننتقل للمرحلة الثانية بأمان
+    # تشغيل الخوارزمية
     path, cost, lines = dijkstra_mongodb(corrected_start, corrected_end)
-    # ... بقية الكود كما هو
+
+    # التحقق من النتيجة وإرجاع الرد المناسب
+    if path is None:
+        return {
+            "status": "no_path",
+            "message": f"لا يوجد مسار مسجل بين {corrected_start} و {corrected_end}",
+            "corrected_names": {"from": corrected_start, "to": corrected_end}
+        }
+
+    # إذا وجد مسار، نرجع النجاح مع البيانات
+    return {
+        "status": "success",
+        "corrected_names": {"from": corrected_start, "to": corrected_end},
+        "path": path,
+        "total_cost": round(cost, 3),
+        "lines": lines
+    }
