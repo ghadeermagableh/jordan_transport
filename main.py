@@ -115,29 +115,41 @@ async def suggest_endpoint(q: str):
 @app.get("/get-route")
 async def get_route(start: str, end: str):
     all_places = get_all_places_list()
+    
+    # تنظيف المدخلات
+    norm_start = normalize_arabic(start)
+    norm_end = normalize_arabic(end)
 
-    # محاولة التطابق بدقة عالية (90%)
-    match_start = process.extractOne(normalize_arabic(start), all_places, score_cutoff=90)
-    match_end = process.extractOne(normalize_arabic(end), all_places, score_cutoff=90)
+    corrected_start = None
+    corrected_end = None
 
-    if not match_start or not match_end:
+    # --- الخطوة 1: البحث عن تطابق تام (تجاوز الـ 90%) ---
+    for place in all_places:
+        norm_place = normalize_arabic(place)
+        if norm_place == norm_start:
+            corrected_start = place
+        if norm_place == norm_end:
+            corrected_end = place
+
+    # --- الخطوة 2: إذا لم نجد تطابق تام، نستخدم الـ Fuzzy Matching ---
+    if not corrected_start:
+        match = process.extractOne(norm_start, all_places, score_cutoff=90)
+        if match: corrected_start = match[0]
+        
+    if not corrected_end:
+        match = process.extractOne(norm_end, all_places, score_cutoff=90)
+        if match: corrected_end = match[0]
+
+    # --- الخطوة 3: التحقق النهائي ---
+    if not corrected_start or not corrected_end:
         return {
             "status": "ambiguous",
-            "message": "الرجاء اختيار المنطقة الصحيحة من المقترحات",
             "suggestions": {
-                "start": get_suggestions(start, all_places) if not match_start else [match_start[0]],
-                "end": get_suggestions(end, all_places) if not match_end else [match_end[0]]
+                "start": get_suggestions(start, all_places) if not corrected_start else [corrected_start],
+                "end": get_suggestions(end, all_places) if not corrected_end else [corrected_end]
             }
         }
 
-    corrected_start, corrected_end = match_start[0], match_end[0]
+    # الآن ننتقل للمرحلة الثانية بأمان
     path, cost, lines = dijkstra_mongodb(corrected_start, corrected_end)
-
-    if not path:
-        return {"status": "no_path", "corrected_names": {"from": corrected_start, "to": corrected_end}}
-
-    return {
-        "status": "success",
-        "corrected_names": {"from": corrected_start, "to": corrected_end},
-        "path": path, "total_cost": round(cost, 3), "lines": lines
-    }
+    # ... بقية الكود كما هو
